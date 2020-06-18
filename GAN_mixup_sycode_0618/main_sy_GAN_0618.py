@@ -1,3 +1,4 @@
+
 from IPython import display
 
 import torch
@@ -15,7 +16,8 @@ import functools
 import torch
 import argparse
 import errno
-import foolbox as fb
+import easydict
+#import foolbox as fb
 
 import torch.nn as nn
 import torch.optim as optim
@@ -267,177 +269,144 @@ def train_active(train_loader,test_loader,net,strategy_type,args):
     return acc
 
 
-def main(args):
-    ############## CONSTANTS #######################
-    data_type = args.data_type #'circle'
-    distance_type = args.distance_type #'L2'
-    train_add_noise = args.train_add_noise #False
-    lr = args.lr #0.005
-    wd = args.wd # 1e-4
-    network_name = args.network_name ### need to change
-    batch_size = args.batch_size # 4, active learning batch size
-    epochs = args.epochs # 40
-    label_GAN = args.label_GAN #2
 
-    if data_type in ['circle', 'moon']:    n_samples_train = 100
-    else:    n_samples_train = 1000 #200 #1000 #200 # number of samples for train
-    n_samples_test = 1000 # number of samples for test
 
-    use_cuda = torch.cuda.is_available()
-    if torch.cuda.device_count() > 2:
-        device = 'cuda:3' if use_cuda else 'cpu' 
-    else:
-        device = 'cuda' if use_cuda else 'cpu'
 
-    if use_cuda:    n_workers = 4
-    else:    n_workers = 1
+############## CONSTANTS #######################
+
+args = easydict.EasyDict({'data_type': 'circle',
+        'distance_type': 'L2',
+        'train_add_noise' : False,
+        'network_name' : None,
+        'lr' : 0.01 ,
+        'wd' : 1e-5,
+        'epochs' : 20,
+        'batch_size' : 4,
+        'label_GAN' : 2,
+        'n_workers' : 1,
+        'device' : 'cuda',
+        'label_first' : 0,
+        'label_last' : 1,
+        'image_size_ref' : 32,
+        'num_class' :2 ,
+        'num_class_total' : 2,
+        'data_class' : 'Synthetic',
+        'num_layer' : 6,
+        'z_dim' : 1,
+        'data_dim' : 2,
+        'num_epochs_z' : 10 ,
+        'num_random_z' : 3,
+        'NUM_INIT_LABEL' : 4,
+        'NUM_QUERY' : 4,
+        'NUM_ROUND' : 24,
+        'NUM_ITER': 30,
+        'active_num_epoch' : 3,
+        'criterion' : nn.CrossEntropyLoss(),
+        'n_samples_train' : 100,
+        'n_samples_test' : 1000,
+        'gan' : None
+        })
+
+#args = args_pool[DATA_NAME]
+
+NUM_ROUND = int((args['n_samples_train']-args['NUM_INIT_LABEL'])/args['NUM_QUERY'])
+#n_samples_train = 100
+#n_samples_test = 1000
+
+
+data_type = args.data_type
+distance_type = args['distance_type']
+train_add_noise = args['train_add_noise']
+lr = args['lr'] 
+wd = args['wd'] 
+network_name = args['network_name']
+epochs = args['epochs']
+batch_size = args['batch_size'] 
+
+label_GAN = args['label_GAN']
+n_workers = args['n_workers']
+device = args['device']
+label_first = args['label_first']
+label_last = args['label_last']
+image_size_ref = args['image_size_ref']
+num_class = args['num_class']
+num_class_total = args['num_class_total']
+data_class = args['data_class']
+
+num_layer = args['num_layer']
+z_dim = args['z_dim']
+data_dim = args['data_dim']
+num_epochs_z = args['num_epochs_z']
+num_random_z = args['num_random_z']
+NUM_INIT_LABEL = args['NUM_INIT_LABEL']
+NUM_QUERY = args['NUM_QUERY']
+NUM_ROUND = args['NUM_ROUND']
+NUM_ITER = args['NUM_ITER']
+active_num_epoch = args['active_num_epoch']
+criterion = args['criterion']
+n_samples_train = args['n_samples_train']
+n_samples_test = args['n_samples_test']
+
+
+use_cuda = torch.cuda.is_available()
+if torch.cuda.device_count() > 2:
+    args['device'] = 'cuda:3' if use_cuda else 'cpu' 
+else:
+    args['device'] = 'cuda' if use_cuda else 'cpu'
+
+if use_cuda:    args['n_workers'] = 4
+else:    args['n_workers'] = 1
+
+
+
+######## LOAD DATASET
+###### LOAD Train data ########
+
+data_, label_, test_data_, test_label_, X_test = load_synthetic_data(args['data_type'], args['data_dim'], args['n_samples_train'], args['n_samples_test'], False, args['device'], args['train_add_noise']) 
     
-    if data_type in ['mnist','mnist_ext']:
-        label_first, label_last = [7,9]
-        image_size_ref = 28
-        data_class = 'Real'
-        num_class,num_class_total,numCH,z_dim, data_dim=[2,10,1,100,2]
-        if network_name == 'LeNet' or 'MLP': image_size_ref = 32
+saved_generator = load_GAN(data_type, data_dim, z_dim, num_class, device, train_add_noise, label_GAN) 
+saved_generator.eval()
+saved_generator = saved_generator.to(device)   
+#print(saved_generator)
 
-    elif data_type in ['cifar10']:
-        label_first, label_last = [7,9]
-        image_size_ref = 32
-        data_class = 'Real'
-        num_class,num_class_total,numCH,z_dim=[2,10,3,100]
+args['gan'] = saved_generator
 
-    else:
-        label_first, label_last = [0,1]
-        image_size_ref = 32
-        data_class = 'Synthetic'
-        num_class,num_class_total=[2,2]
-        num_layer = 6
-        if data_type == 'bracket':    num_layer = 4 
+tr_dataset = TensorDataset(data_, label_)
+te_dataset = TensorDataset(test_data_, test_label_)
+active_train_loader = torch.utils.data.DataLoader(tr_dataset, batch_size = batch_size, shuffle=True, num_workers = n_workers)    
+active_test_loader = torch.utils.data.DataLoader(te_dataset, batch_size = batch_size, shuffle=True, num_workers = n_workers)    
+
+############# start active training
+trial_num = int(np.random.randint(10))
+seed((int)(42+trial_num))
+
+acc = torch.zeros((2)) #NUM_ITER))#,NUM_ROUND+1))
+fin_acc_rand = torch.zeros((NUM_ROUND+1)) #NUM_ITER,
+fin_acc_GAN = torch.zeros((NUM_ROUND+1))#NUM_ITER,
+
+#train_loader,test_loader,net,strategy_type,args
+
+for num_iter in range(NUM_ITER):
+    #total_train_loss,total_train_acc,total_test_loss,total_test_acc
+    network = simple_Ndim_Net(args)
+    #print(network)
+    acc_sup_train,acc_sup_test = train_fullysup(active_train_loader,active_test_loader,network,args)
+    acc[0]=((num_iter*acc[0])+acc_sup_train)/(num_iter+1)
+    acc[1]=((num_iter*acc[1])+acc_sup_test)/(num_iter+1)
+    print(acc)
     
-        # why we don't have numCH here?
-        if data_type in ['high_circle']: z_dim, data_dim= [2,3]
-        else:                            z_dim, data_dim= [1,2]
-
-    if data_type == 'circle':
-        NUM_INIT_LABEL = 4
-        NUM_QUERY = 4
-        
-    elif data_type == 'mnist':
-        args.batch_size = 200
-        NUM_INIT_LABEL = 200
-        NUM_QUERY = 200
-
-    NUM_ROUND = int((n_samples_train-NUM_INIT_LABEL)/NUM_QUERY) #20 #
-    NUM_ITER = 30#5#00
-
-    args.n_workers = n_workers
-    args.device = device
-    args.label_first = label_first
-    args.label_last = label_last
-    args.image_size_ref = image_size_ref
+    network = simple_Ndim_Net(args)
+    strategy_type = 'RandomSampling'
+    acc_rand = train_active(active_train_loader,active_test_loader,network,strategy_type,args)
+    #train_with_randomquery(tr_dataset,active_test_loader,network,criterion,active_batch_size,n_workers,NUM_ROUND,NUM_INIT_LABEL,NUM_QUERY)
+    #acc2 = train_with_GANmixupmove(tr_dataset,network,optimizer,criterion,active_batch_size,n_workers)
     
-    args.num_class = num_class
-    args.num_class_total = num_class_total
-    args.data_class = data_class
-    args.num_layer = num_layer
-    args.z_dim = z_dim
-    args.data_dim = data_dim
+    network = simple_Ndim_Net(args)
+    strategy_type = 'GANdistance'
+    acc_GAN = train_active(active_train_loader,active_test_loader,network,strategy_type,args)
 
-    args.num_epochs_z = 10
-    args.num_random_z = 3
+    fin_acc_rand = ((num_iter*fin_acc_rand)+torch.FloatTensor(acc_rand))/(num_iter+1)
+    fin_acc_GAN = ((num_iter*fin_acc_rand)+torch.FloatTensor(acc_GAN))/(num_iter+1)
 
-    args.NUM_INIT_LABEL = NUM_INIT_LABEL
-    args.NUM_QUERY = NUM_QUERY
-    args.NUM_ROUND = NUM_ROUND
-    
-    args.active_num_epoch = 3 #1
-
-    args.criterion = nn.CrossEntropyLoss()
-
-    ######## LOAD DATASET
-    ###### LOAD Train data ########
-
-    if data_class in ['Real']: #data_type in ['mnist','mnist_ext']:
-        train_dataset, test_dataset = load_real_data(data_type, image_size_ref, label_first, label_second, num_mnist_train_data, entire_class, False, no_normalize=False)
-        n_samples_hard_train = len(train_dataset)
-
-    elif data_class in ['Synthetic']:
-        data_, label_, test_data_, test_label_, X_test = load_synthetic_data(data_type, data_dim, n_samples_train, n_samples_test, False, device, train_add_noise) 
-        
-    saved_generator = load_GAN(data_type, data_dim, z_dim, num_class, device, train_add_noise, label_GAN) 
-    saved_generator.eval()
-    saved_generator = saved_generator.to(device)   
-    #print(saved_generator)
-
-    args.gan = saved_generator
-
-    tr_dataset = TensorDataset(data_, label_)
-    te_dataset = TensorDataset(test_data_, test_label_)
-    active_train_loader = torch.utils.data.DataLoader(tr_dataset, batch_size = batch_size, shuffle=True, num_workers = n_workers)    
-    active_test_loader = torch.utils.data.DataLoader(te_dataset, batch_size = batch_size, shuffle=True, num_workers = n_workers)    
-    
-    ############# start active training
-    trial_num = int(np.random.randint(10))
-    seed((int)(42+trial_num))
-
-    acc = torch.zeros((2)) #NUM_ITER))#,NUM_ROUND+1))
-    fin_acc_rand = torch.zeros((NUM_ROUND+1)) #NUM_ITER,
-    fin_acc_GAN = torch.zeros((NUM_ROUND+1))#NUM_ITER,
-
-    #train_loader,test_loader,net,strategy_type,args
-
-    for num_iter in range(NUM_ITER):
-        #total_train_loss,total_train_acc,total_test_loss,total_test_acc
-        network = simple_Ndim_Net(args)
-        #print(network)
-        acc_sup_train,acc_sup_test = train_fullysup(active_train_loader,active_test_loader,network,args)
-        acc[0]=((num_iter*acc[0])+acc_sup_train)/(num_iter+1)
-        acc[1]=((num_iter*acc[1])+acc_sup_test)/(num_iter+1)
-        print(acc)
-        
-        network = simple_Ndim_Net(args)
-        strategy_type = 'RandomSampling'
-        acc_rand = train_active(active_train_loader,active_test_loader,network,strategy_type,args)
-        #train_with_randomquery(tr_dataset,active_test_loader,network,criterion,active_batch_size,n_workers,NUM_ROUND,NUM_INIT_LABEL,NUM_QUERY)
-        #acc2 = train_with_GANmixupmove(tr_dataset,network,optimizer,criterion,active_batch_size,n_workers)
-        
-        network = simple_Ndim_Net(args)
-        strategy_type = 'GANdistance'
-        acc_GAN = train_active(active_train_loader,active_test_loader,network,strategy_type,args)
-
-        fin_acc_rand = ((num_iter*fin_acc_rand)+torch.FloatTensor(acc_rand))/(num_iter+1)
-        fin_acc_GAN = ((num_iter*fin_acc_rand)+torch.FloatTensor(acc_GAN))/(num_iter+1)
-
-        print('single iteration finished')
-        print(num_iter,'\n',acc,'\n',fin_acc_rand,'\n',fin_acc_GAN)
-
-
-
-if __name__ == '__main__':
-        
-    parser = argparse.ArgumentParser(description='PyTorch Training: GAN-active learning')
-
-    parser.add_argument('--data_type', default='circle', type=str, choices=['moon', 'circle', 'high_circle', 'v_shaped', 'bracket', 'mnist', 'mnist_ext', 'cifar10'], help='Data Type')
-    parser.add_argument('--distance_type', default='L2', type=str, choices=['L2', 'L1', 'Linf', 'Linf+L2'], help='Distance Type')
-    parser.add_argument('--train_add_noise', default=False, type=bool, help='Add noise to the train data')
-    parser.add_argument('--network_name', default=None, type=str, choices=['LeNet', 'ConvNet', 'MLP'], help='name of the network used for training real data')
-    parser.add_argument('--lr', default=0.01, type=float, help='Learning rate (lr)')
-    parser.add_argument('--wd', default=1e-5, type=float, help='Weight decay (wd)')
-    parser.add_argument('--epochs', default=20, type=int, help='Training epochs')
-    parser.add_argument('--batch_size', default=4, type=int, help='Batch size')
-    parser.add_argument('--label_GAN', default=2, type=int, choices = [2,10], help='Dimension of label y in conditional GAN (for mnist)')
-    args = parser.parse_args()
-        
-    #sys.stdout = open("outputfile.txt","w")
-    main(args)
-    #sys.stdout.close()
-
-    
-    # if data_class == 'Synthetic':
-    #     model = simple_Ndim_Net(num_layer, data_dim, num_class).to(device)
-    #     best_model = simple_Ndim_Net(num_layer, data_dim, num_class).to(device)
-    # else:
-    #     if network_name == 'ConvNet': model, best_model = ConvNet().to(device), ConvNet().to(device)
-    #     elif network_name == 'LeNet': model, best_model = LeNet(num_class_total).to(device), LeNet(num_class_total).to(device)
-    #     elif network_name == 'MLP': model, best_model = MLP().to(device), MLP().to(device)
-
-    
+    print('single iteration finished')
+    print(num_iter,'\n',acc,'\n',fin_acc_rand,'\n',fin_acc_GAN)
